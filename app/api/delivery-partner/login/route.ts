@@ -1,62 +1,54 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import {
-  createHmac,
-  scryptSync,
-  timingSafeEqual,
-} from "node:crypto";
+  createDeliverySession,
+  deliveryCookieOptions,
+  supabaseRequest,
+  responseMessage,
+  COOKIE_NAME,
+} from "@/lib/delivery-auth";
+import { scryptSync, timingSafeEqual } from "node:crypto";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
   try {
-    const {
-      SUPABASE_URL,
-      SUPABASE_SECRET_KEY,
-      DELIVERY_SESSION_SECRET,
-    } = process.env;
-
-    if (!SUPABASE_URL || !SUPABASE_SECRET_KEY || !DELIVERY_SESSION_SECRET) {
-      return NextResponse.json(
-        { success: false, message: "Server configuration is incomplete." },
-        { status: 500 }
-      );
-    }
-
     const body = await request.json();
     const phone = String(body.phone ?? "").replace(/\D/g, "");
     const pin = String(body.pin ?? "");
 
     if (!/^\d{10}$/.test(phone) || !/^\d{6}$/.test(pin)) {
       return NextResponse.json(
-        { success: false, message: "Enter a valid mobile number and 6-digit PIN." },
+        {
+          success: false,
+          message: "Enter a valid mobile number and 6-digit PIN.",
+        },
         { status: 400 }
       );
     }
 
-    const url = new URL("/rest/v1/delivery_partners", SUPABASE_URL);
-    url.searchParams.set("phone", `eq.${phone}`);
-    url.searchParams.set("is_active", "eq.true");
-    url.searchParams.set("select", "id,phone,full_name,pin_hash");
-    url.searchParams.set("limit", "1");
-
-    const dbResponse = await fetch(url, {
-      headers: {
-        apikey: SUPABASE_SECRET_KEY,
-        Authorization: `Bearer ${SUPABASE_SECRET_KEY}`,
-      },
-      cache: "no-store",
+    const query = new URLSearchParams({
+      phone: `eq.${phone}`,
+      is_active: "eq.true",
+      select: "id,phone,full_name,pin_hash",
+      limit: "1",
     });
 
-    if (!dbResponse.ok) {
+    const result = await supabaseRequest(
+      `delivery_partners?${query.toString()}`
+    );
+
+    if (!result.ok) {
+      const message = await responseMessage(result);
       return NextResponse.json(
-        { success: false, message: "Unable to verify login." },
-        { status: 500 }
+        { success: false, message: message || "Unable to verify login." },
+        { status: 502 }
       );
     }
 
-    const partners = await dbResponse.json();
-    const partner = partners[0];
+    const partners = await result.json();
+    const partner = Array.isArray(partners) ? partners[0] : null;
 
     if (!partner?.pin_hash || typeof partner.pin_hash !== "string") {
       return NextResponse.json(
@@ -78,7 +70,7 @@ export async function POST(request: NextRequest) {
     const expected = Buffer.from(storedHash, "hex");
 
     if (
-      expected.length !== calculated.length ||
+      calculated.length !== expected.length ||
       !timingSafeEqual(calculated, expected)
     ) {
       return NextResponse.json(
@@ -87,14 +79,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const expiresAt = Date.now() + 8 * 60 * 60 * 1000;
-    const payload = Buffer.from(
-      JSON.stringify({ partnerId: partner.id, exp: expiresAt })
-    ).toString("base64url");
-
-    const signature = createHmac("sha256", DELIVERY_SESSION_SECRET)
-      .update(payload)
-      .digest("base64url");
+    const token = createDeliverySession({
+      partnerId: String(partner.id),
+      phone: String(partner.phone),
+      name: String(partner.full_name),
+      expiresAt: Date.now() + 8 * 60 * 60 * 1000,
+    });
 
     const response = NextResponse.json({
       success: true,
@@ -105,20 +95,15 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    response.cookies.set("qb_delivery_session", `${payload}.${signature}`, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      path: "/",
-      maxAge: 8 * 60 * 60,
-    });
+    response.cookies.set(COOKIE_NAME, token, deliveryCookieOptions());
 
     return response;
-  } catch {
+  } catch (error) {
+    console.error("Delivery partner login error:", error);
+
     return NextResponse.json(
-      { success: false, message: "Invalid request." },
-      { status: 400 }
+      { success: false, message: "Unable to login. Please try again." },
+      { status: 500 }
     );
   }
 }
-
