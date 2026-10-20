@@ -4,7 +4,7 @@ import {
   readDeliverySession,
   responseMessage,
   supabaseRequest,
-} from "@/lib/delivery-auth";
+} from "../../../../lib/delivery-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -37,20 +37,17 @@ export async function PATCH(request: NextRequest) {
       );
     }
 
-    const checkQuery = new URLSearchParams({
+    const query = new URLSearchParams({
       select: "id,assigned_partner_id",
       id: `eq.${orderId}`,
       assigned_partner_id: `eq.${session.partnerId}`,
     });
 
-    const check = await supabaseRequest(
-      `orders?${checkQuery.toString()}`
-    );
+    const check = await supabaseRequest(`orders?${query.toString()}`);
 
     if (!check.ok) {
-      const message = await responseMessage(check);
       return NextResponse.json(
-        { success: false, message },
+        { success: false, message: await responseMessage(check) },
         { status: 502 }
       );
     }
@@ -59,7 +56,10 @@ export async function PATCH(request: NextRequest) {
 
     if (!Array.isArray(orders) || orders.length === 0) {
       return NextResponse.json(
-        { success: false, message: "Order not found for this partner." },
+        {
+          success: false,
+          message: "Order not found for this partner.",
+        },
         { status: 404 }
       );
     }
@@ -73,17 +73,14 @@ export async function PATCH(request: NextRequest) {
       `orders?${updateQuery.toString()}`,
       {
         method: "PATCH",
-        headers: {
-          Prefer: "return=representation",
-        },
+        headers: { Prefer: "return=representation" },
         body: JSON.stringify({ order_status: status }),
       }
     );
 
     if (!update.ok) {
-      const message = await responseMessage(update);
       return NextResponse.json(
-        { success: false, message },
+        { success: false, message: await responseMessage(update) },
         { status: 502 }
       );
     }
