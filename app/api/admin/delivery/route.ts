@@ -7,13 +7,32 @@ const URL = process.env.SUPABASE_URL;
 const SECRET = process.env.SUPABASE_SECRET_KEY;
 const ADMIN_KEY = process.env.DELIVERY_ADMIN_KEY;
 
+const allowedStatuses = [
+  "placed",
+  "preparing",
+  "out_for_delivery",
+  "delivered",
+  "cancelled",
+] as const;
+
+type OrderStatus = (typeof allowedStatuses)[number];
+
+function jsonError(message: string, status: number, details?: string) {
+  return NextResponse.json(
+    { error: message, ...(details ? { details } : {}) },
+    { status }
+  );
+}
+
 function authorized(request: Request) {
   const key = request.headers.get("x-delivery-admin-key");
   return Boolean(ADMIN_KEY && key && key === ADMIN_KEY);
 }
 
 async function db(path: string, options: RequestInit = {}) {
-  if (!URL || !SECRET) throw new Error("Supabase is not configured.");
+  if (!URL || !SECRET) {
+    throw new Error("Supabase environment variables are missing.");
+  }
 
   return fetch(`${URL}/rest/v1/${path}`, {
     ...options,
@@ -27,20 +46,22 @@ async function db(path: string, options: RequestInit = {}) {
   });
 }
 
+async function responseError(response: Response) {
+  const text = await response.text();
+  try {
+    const data = JSON.parse(text);
+    return data.message || data.details || data.hint || text;
+  } catch {
+    return text || `HTTP ${response.status}`;
+  }
+}
+
 const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-const statuses = [
-  "placed",
-  "preparing",
-  "out_for_delivery",
-  "delivered",
-  "cancelled",
-];
-
 export async function GET(request: Request) {
   if (!authorized(request)) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return jsonError("Unauthorized. Check the admin key.", 401);
   }
 
   try {
@@ -53,10 +74,19 @@ export async function GET(request: Request) {
       ),
     ]);
 
-    if (!ordersRes.ok || !partnersRes.ok) {
-      return NextResponse.json(
-        { error: "Could not load delivery data. Check Supabase tables." },
-        { status: 502 }
+    if (!ordersRes.ok) {
+      return jsonError(
+        "Could not load orders.",
+        502,
+        await responseError(ordersRes)
+      );
+    }
+
+    if (!partnersRes.ok) {
+      return jsonError(
+        "Could not load delivery partners.",
+        502,
+        await responseError(partnersRes)
       );
     }
 
@@ -66,17 +96,18 @@ export async function GET(request: Request) {
     ]);
 
     return NextResponse.json({ orders, partners });
-  } catch {
-    return NextResponse.json(
-      { error: "Delivery service unavailable." },
-      { status: 503 }
+  } catch (error) {
+    return jsonError(
+      "Delivery service unavailable.",
+      503,
+      error instanceof Error ? error.message : "Unknown server error."
     );
   }
 }
 
 export async function POST(request: Request) {
   if (!authorized(request)) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return jsonError("Unauthorized. Check the admin key.", 401);
   }
 
   try {
@@ -93,9 +124,9 @@ export async function POST(request: Request) {
         fullName.length > 100 ||
         !/^[6-9]\d{9}$/.test(phone)
       ) {
-        return NextResponse.json(
-          { error: "Enter a name and valid 10-digit mobile number." },
-          { status: 400 }
+        return jsonError(
+          "Enter a name and valid 10-digit mobile number.",
+          400
         );
       }
 
@@ -110,16 +141,15 @@ export async function POST(request: Request) {
       });
 
       if (!response.ok) {
-        return NextResponse.json(
-          { error: "Partner could not be added. Phone may already exist." },
-          { status: 502 }
+        return jsonError(
+          "Partner could not be added.",
+          502,
+          await responseError(response)
         );
       }
 
-      return NextResponse.json(
-        { partner: (await response.json())[0] },
-        { status: 201 }
-      );
+      const rows = await response.json();
+      return NextResponse.json({ partner: rows[0] }, { status: 201 });
     }
 
     if (body.action === "assign_order") {
@@ -129,21 +159,25 @@ export async function POST(request: Request) {
         typeof body.partnerId === "string" ? body.partnerId : "";
 
       if (!uuidPattern.test(orderId) || !uuidPattern.test(partnerId)) {
-        return NextResponse.json(
-          { error: "Select a valid order and partner." },
-          { status: 400 }
-        );
+        return jsonError("Select a valid order and partner.", 400);
       }
 
       const partnerRes = await db(
         `delivery_partners?id=eq.${partnerId}&is_active=eq.true&select=id`
       );
 
-      if (!partnerRes.ok || (await partnerRes.json()).length === 0) {
-        return NextResponse.json(
-          { error: "Active delivery partner not found." },
-          { status: 400 }
+      if (!partnerRes.ok) {
+        return jsonError(
+          "Could not verify delivery partner.",
+          502,
+          await responseError(partnerRes)
         );
+      }
+
+      const partners = await partnerRes.json();
+
+      if (!partners.length) {
+        return jsonError("Active delivery partner not found.", 400);
       }
 
       const response = await db(
@@ -159,15 +193,17 @@ export async function POST(request: Request) {
       );
 
       if (!response.ok) {
-        return NextResponse.json(
-          { error: "Order assignment failed." },
-          { status: 502 }
+        return jsonError(
+          "Order assignment failed.",
+          502,
+          await responseError(response)
         );
       }
 
       const rows = await response.json();
+
       if (!rows.length) {
-        return NextResponse.json({ error: "Order not found." }, { status: 404 });
+        return jsonError("Order not found.", 404);
       }
 
       return NextResponse.json({ order: rows[0] });
@@ -176,12 +212,19 @@ export async function POST(request: Request) {
     if (body.action === "update_order_status") {
       const orderId =
         typeof body.orderId === "string" ? body.orderId : "";
-      const status = typeof body.status === "string" ? body.status : "";
+      const status =
+        typeof body.status === "string" ? body.status.trim() : "";
 
-      if (!uuidPattern.test(orderId) || !statuses.includes(status)) {
-        return NextResponse.json(
-          { error: "Select a valid order and status." },
-          { status: 400 }
+      if (!uuidPattern.test(orderId)) {
+        return jsonError("Invalid order ID.", 400);
+      }
+
+      if (
+        !allowedStatuses.includes(status as OrderStatus)
+      ) {
+        return jsonError(
+          `Invalid status: ${status}.`,
+          400
         );
       }
 
@@ -195,25 +238,35 @@ export async function POST(request: Request) {
       );
 
       if (!response.ok) {
-        return NextResponse.json(
-          { error: "Order status update failed." },
-          { status: 502 }
+        return jsonError(
+          `Could not update order status to "${status}".`,
+          502,
+          await responseError(response)
         );
       }
 
       const rows = await response.json();
+
       if (!rows.length) {
-        return NextResponse.json({ error: "Order not found." }, { status: 404 });
+        return jsonError(
+          "Order not found or no row was updated.",
+          404
+        );
       }
 
-      return NextResponse.json({ order: rows[0] });
+      return NextResponse.json({
+        success: true,
+        message: `Order status updated to ${rows[0].order_status}.`,
+        order: rows[0],
+      });
     }
 
-    return NextResponse.json({ error: "Unknown action." }, { status: 400 });
-  } catch {
-    return NextResponse.json(
-      { error: "Invalid request or database error." },
-      { status: 400 }
+    return jsonError("Unknown action.", 400);
+  } catch (error) {
+    return jsonError(
+      "Request failed.",
+      500,
+      error instanceof Error ? error.message : "Unknown server error."
     );
   }
 }
