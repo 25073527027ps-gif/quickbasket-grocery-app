@@ -4,7 +4,7 @@ import {
   readDeliverySession,
   responseMessage,
   supabaseRequest,
-} from "@/lib/delivery-auth";
+} from "../../../../lib/delivery-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,17 +27,13 @@ export async function GET(request: NextRequest) {
       order: "created_at.desc",
     });
 
-    const response = await supabaseRequest(
-      `orders?${query.toString()}`
-    );
+    const response = await supabaseRequest(`orders?${query.toString()}`);
 
     if (!response.ok) {
-      const message = await responseMessage(response);
-
       return NextResponse.json(
         {
           success: false,
-          message: message || "Orders load nahi hue.",
+          message: await responseMessage(response),
         },
         { status: 502 }
       );
