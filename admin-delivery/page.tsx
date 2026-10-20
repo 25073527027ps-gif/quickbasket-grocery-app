@@ -1,186 +1,219 @@
 
+import { NextResponse } from "next/server";
 
-"use client";
+export const dynamic = "force-dynamic";
 
-import { useEffect, useState } from "react";
+const URL = process.env.SUPABASE_URL;
+const SECRET = process.env.SUPABASE_SECRET_KEY;
+const ADMIN_KEY = process.env.DELIVERY_ADMIN_KEY;
 
-type Order = {
-  id: string;
-  order_number: string;
-  customer_name: string;
-  customer_phone: string;
-  delivery_address: string;
-  order_status: string;
-  total: number;
-  created_at: string;
-  assigned_partner_id: string | null;
-  assigned_at: string | null;
-};
+function authorized(request: Request) {
+  const key = request.headers.get("x-delivery-admin-key");
+  return Boolean(ADMIN_KEY && key && key === ADMIN_KEY);
+}
 
-type Partner = {
-  id: string;
-  full_name: string;
-  phone: string;
-  is_active: boolean;
-};
+async function db(path: string, options: RequestInit = {}) {
+  if (!URL || !SECRET) throw new Error("Supabase is not configured.");
 
-export default function DeliveryAdminPage() {
-  const [key, setKey] = useState("");
-  const [connected, setConnected] = useState(false);
-  const [orders, setOrders] = useState<Order[]>([]);
-  const [partners, setPartners] = useState<Partner[]>([]);
-  const [name, setName] = useState("");
-  const [phone, setPhone] = useState("");
-  const [assignments, setAssignments] = useState<Record<string, string>>({});
-  const [message, setMessage] = useState("");
-  const [loading, setLoading] = useState(false);
+  return fetch(`${URL}/rest/v1/${path}`, {
+    ...options,
+    headers: {
+      apikey: SECRET,
+      Authorization: `Bearer ${SECRET}`,
+      "Content-Type": "application/json",
+      ...options.headers,
+    },
+    cache: "no-store",
+  });
+}
 
-  async function api(body?: object) {
-    return fetch("/api/admin/delivery", {
-      method: body ? "POST" : "GET",
-      headers: {
-        "Content-Type": "application/json",
-        "x-delivery-admin-key": key,
-      },
-      ...(body ? { body: JSON.stringify(body) } : {}),
-      cache: "no-store",
-    });
+const uuidPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const statuses = [
+  "placed",
+  "preparing",
+  "out_for_delivery",
+  "delivered",
+  "cancelled",
+];
+
+export async function GET(request: Request) {
+  if (!authorized(request)) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  async function loadData() {
-    setLoading(true);
-    setMessage("");
-    try {
-      const response = await api();
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "Could not load data.");
-      setOrders(data.orders || []);
-      setPartners(data.partners || []);
-      setConnected(true);
-      setMessage("Connected successfully.");
-    } catch (error) {
-      setConnected(false);
-      setMessage(error instanceof Error ? error.message : "Connection failed.");
-    } finally {
-      setLoading(false);
+  try {
+    const [ordersRes, partnersRes] = await Promise.all([
+      db(
+        "orders?select=id,order_number,customer_name,customer_phone,delivery_address,order_status,total,created_at,assigned_partner_id,assigned_at&order=created_at.desc&limit=100"
+      ),
+      db(
+        "delivery_partners?select=id,full_name,phone,is_active&order=created_at.desc"
+      ),
+    ]);
+
+    if (!ordersRes.ok || !partnersRes.ok) {
+      return NextResponse.json(
+        { error: "Could not load delivery data. Check Supabase tables." },
+        { status: 502 }
+      );
     }
+
+    const [orders, partners] = await Promise.all([
+      ordersRes.json(),
+      partnersRes.json(),
+    ]);
+
+    return NextResponse.json({ orders, partners });
+  } catch {
+    return NextResponse.json(
+      { error: "Delivery service unavailable." },
+      { status: 503 }
+    );
+  }
+}
+
+export async function POST(request: Request) {
+  if (!authorized(request)) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  async function addPartner(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    setMessage("");
-    try {
-      const response = await api({ action: "add_partner", fullName: name, phone });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "Partner could not be added.");
-      setName("");
-      setPhone("");
-      await loadData();
-      setMessage("Delivery partner added successfully.");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Something went wrong.");
+  try {
+    const body = await request.json();
+
+    if (body.action === "add_partner") {
+      const fullName =
+        typeof body.fullName === "string" ? body.fullName.trim() : "";
+      const phone =
+        typeof body.phone === "string" ? body.phone.trim() : "";
+
+      if (
+        fullName.length < 2 ||
+        fullName.length > 100 ||
+        !/^[6-9]\d{9}$/.test(phone)
+      ) {
+        return NextResponse.json(
+          { error: "Enter a name and valid 10-digit mobile number." },
+          { status: 400 }
+        );
+      }
+
+      const response = await db("delivery_partners", {
+        method: "POST",
+        headers: { Prefer: "return=representation" },
+        body: JSON.stringify({
+          full_name: fullName,
+          phone,
+          is_active: true,
+        }),
+      });
+
+      if (!response.ok) {
+        return NextResponse.json(
+          { error: "Partner could not be added. Phone may already exist." },
+          { status: 502 }
+        );
+      }
+
+      return NextResponse.json(
+        { partner: (await response.json())[0] },
+        { status: 201 }
+      );
     }
+
+    if (body.action === "assign_order") {
+      const orderId =
+        typeof body.orderId === "string" ? body.orderId : "";
+      const partnerId =
+        typeof body.partnerId === "string" ? body.partnerId : "";
+
+      if (!uuidPattern.test(orderId) || !uuidPattern.test(partnerId)) {
+        return NextResponse.json(
+          { error: "Select a valid order and partner." },
+          { status: 400 }
+        );
+      }
+
+      const partnerRes = await db(
+        `delivery_partners?id=eq.${partnerId}&is_active=eq.true&select=id`
+      );
+
+      if (!partnerRes.ok || (await partnerRes.json()).length === 0) {
+        return NextResponse.json(
+          { error: "Active delivery partner not found." },
+          { status: 400 }
+        );
+      }
+
+      const response = await db(
+        `orders?id=eq.${orderId}&select=id,order_number,assigned_partner_id,assigned_at`,
+        {
+          method: "PATCH",
+          headers: { Prefer: "return=representation" },
+          body: JSON.stringify({
+            assigned_partner_id: partnerId,
+            assigned_at: new Date().toISOString(),
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        return NextResponse.json(
+          { error: "Order assignment failed." },
+          { status: 502 }
+        );
+      }
+
+      const rows = await response.json();
+      if (!rows.length) {
+        return NextResponse.json({ error: "Order not found." }, { status: 404 });
+      }
+
+      return NextResponse.json({ order: rows[0] });
+    }
+
+    if (body.action === "update_order_status") {
+      const orderId =
+        typeof body.orderId === "string" ? body.orderId : "";
+      const status = typeof body.status === "string" ? body.status : "";
+
+      if (!uuidPattern.test(orderId) || !statuses.includes(status)) {
+        return NextResponse.json(
+          { error: "Select a valid order and status." },
+          { status: 400 }
+        );
+      }
+
+      const response = await db(
+        `orders?id=eq.${orderId}&select=id,order_number,order_status`,
+        {
+          method: "PATCH",
+          headers: { Prefer: "return=representation" },
+          body: JSON.stringify({ order_status: status }),
+        }
+      );
+
+      if (!response.ok) {
+        return NextResponse.json(
+          { error: "Order status update failed." },
+          { status: 502 }
+        );
+      }
+
+      const rows = await response.json();
+      if (!rows.length) {
+        return NextResponse.json({ error: "Order not found." }, { status: 404 });
+      }
+
+      return NextResponse.json({ order: rows[0] });
+    }
+
+    return NextResponse.json({ error: "Unknown action." }, { status: 400 });
+  } catch {
+    return NextResponse.json(
+      { error: "Invalid request or database error." },
+      { status: 400 }
+    );
   }
-
-  async function assignOrder(orderId: string) {
-    const partnerId = assignments[orderId];
-    if (!partnerId) {
-      setMessage("Please select a delivery partner first.");
-      return;
-    }
-    setMessage("");
-    try {
-      const response = await api({ action: "assign_order", orderId, partnerId });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "Assignment failed.");
-      await loadData();
-      setMessage("Order assigned successfully.");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Assignment failed.");
-    }
-  }
-
-  return (
-    <main style={{ maxWidth: 1000, margin: "0 auto", padding: 20, fontFamily: "Arial, sans-serif", color: "#172033" }}>
-      <h1>QuickBasket Delivery Admin</h1>
-      <p>Manage customer orders and delivery partners.</p>
-
-      <section style={{ border: "1px solid #ddd", borderRadius: 12, padding: 16, marginBottom: 20 }}>
-        <h2>Admin Access</h2>
-        <form onSubmit={(e) => { e.preventDefault(); void loadData(); }}>
-          <label htmlFor="admin-key">Delivery admin key</label>
-          <input
-            id="admin-key"
-            type="password"
-            value={key}
-            onChange={(e) => { setKey(e.target.value); setConnected(false); }}
-            required
-            autoComplete="current-password"
-            placeholder="Enter your Vercel DELIVERY_ADMIN_KEY"
-            style={{ display: "block", width: "100%", boxSizing: "border-box", padding: 12, margin: "8px 0" }}
-          />
-          <button type="submit" disabled={loading} style={{ padding: "10px 16px" }}>
-            {loading ? "Connecting..." : "Connect / Refresh"}
-          </button>
-        </form>
-      </section>
-
-      {message && <p role="status">{message}</p>}
-
-      {connected && (
-        <>
-          <section style={{ border: "1px solid #ddd", borderRadius: 12, padding: 16, marginBottom: 20 }}>
-            <h2>Add Delivery Partner</h2>
-            <form onSubmit={addPartner}>
-              <label htmlFor="partner-name">Full name</label>
-              <input id="partner-name" value={name} onChange={(e) => setName(e.target.value)} required minLength={2} maxLength={100} style={{ display: "block", width: "100%", boxSizing: "border-box", padding: 10, margin: "8px 0" }} />
-              <label htmlFor="partner-phone">10-digit mobile number</label>
-              <input id="partner-phone" type="tel" inputMode="numeric" pattern="[6-9][0-9]{9}" value={phone} onChange={(e) => setPhone(e.target.value)} required maxLength={10} placeholder="9876543210" style={{ display: "block", width: "100%", boxSizing: "border-box", padding: 10, margin: "8px 0" }} />
-              <button type="submit" style={{ padding: "10px 16px" }}>Add Partner</button>
-            </form>
-
-            <h3>Delivery Partners ({partners.length})</h3>
-            {partners.length === 0 ? <p>No partners added yet.</p> : (
-              <ul>
-                {partners.map((p) => (
-                  <li key={p.id}>{p.full_name} — {p.phone} {p.is_active ? "(Active)" : "(Inactive)"}</li>
-                ))}
-              </ul>
-            )}
-          </section>
-
-          <section>
-            <h2>Customer Orders ({orders.length})</h2>
-            {orders.length === 0 ? <p>No orders found.</p> : orders.map((order) => (
-              <article key={order.id} style={{ border: "1px solid #ddd", borderRadius: 12, padding: 16, marginBottom: 12 }}>
-                <h3>Order #{order.order_number}</h3>
-                <p><strong>Customer:</strong> {order.customer_name} ({order.customer_phone})</p>
-                <p><strong>Address:</strong> {order.delivery_address}</p>
-                <p><strong>Status:</strong> {order.order_status}</p>
-                <p><strong>Total:</strong> ₹{Number(order.total).toFixed(2)}</p>
-                <p><strong>Placed:</strong> {new Date(order.created_at).toLocaleString("en-IN")}</p>
-                <p><strong>Assigned partner:</strong> {partners.find((p) => p.id === order.assigned_partner_id)?.full_name || "Not assigned"}</p>
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  <select
-                    aria-label={`Partner for order ${order.order_number}`}
-                    value={assignments[order.id] ?? order.assigned_partner_id ?? ""}
-                    onChange={(e) => setAssignments((old) => ({ ...old, [order.id]: e.target.value }))}
-                    style={{ padding: 10, flex: 1, minWidth: 180 }}
-                  >
-                    <option value="">Select delivery partner</option>
-                    {partners.filter((p) => p.is_active).map((p) => (
-                      <option key={p.id} value={p.id}>{p.full_name} — {p.phone}</option>
-                    ))}
-                  </select>
-                  <button onClick={() => void assignOrder(order.id)} disabled={!partners.some((p) => p.is_active)} style={{ padding: "10px 16px" }}>
-                    Assign Order
-                  </button>
-                </div>
-              </article>
-            ))}
-          </section>
-        </>
-      )}
-    </main>
-  );
 }
