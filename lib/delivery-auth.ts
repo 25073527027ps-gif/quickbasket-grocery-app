@@ -8,8 +8,7 @@ export type DeliverySession = {
   name: string;
   expiresAt: number;
 };
-
-const COOKIE_NAME = "qb_delivery_session";
+export const COOKIE_NAME = "qb_delivery_session";
 const SESSION_SECRET = process.env.DELIVERY_SESSION_SECRET || "";
 
 function sign(value: string): string {
