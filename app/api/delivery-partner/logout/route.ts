@@ -2,8 +2,7 @@
 import { NextResponse } from "next/server";
 import {
   deliveryCookieOptions,
-  COOKIE_NAME,
-} from "@/lib/delivery-auth";
+} from "../../../../lib/delivery-auth";
 
 export const runtime = "nodejs";
 
@@ -13,7 +12,7 @@ export async function POST() {
     message: "Logged out successfully.",
   });
 
-  response.cookies.set(COOKIE_NAME, "", {
+  response.cookies.set("qb_delivery_session", "", {
     ...deliveryCookieOptions(),
     maxAge: 0,
   });
