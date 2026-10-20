@@ -35,7 +35,10 @@ export async function GET(request: NextRequest) {
       const message = await responseMessage(response);
 
       return NextResponse.json(
-        { success: false, message: message || "Orders load nahi hue." },
+        {
+          success: false,
+          message: message || "Orders load nahi hue.",
+        },
         { status: 502 }
       );
     }
