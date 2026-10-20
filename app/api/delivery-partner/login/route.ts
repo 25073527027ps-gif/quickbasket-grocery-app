@@ -6,7 +6,7 @@ import {
   supabaseRequest,
   responseMessage,
   COOKIE_NAME,
-} from "@/lib/delivery-auth";
+} from "../../../../lib/delivery-auth";
 import { scryptSync, timingSafeEqual } from "node:crypto";
 
 export const runtime = "nodejs";
@@ -20,10 +20,7 @@ export async function POST(request: NextRequest) {
 
     if (!/^\d{10}$/.test(phone) || !/^\d{6}$/.test(pin)) {
       return NextResponse.json(
-        {
-          success: false,
-          message: "Enter a valid mobile number and 6-digit PIN.",
-        },
+        { success: false, message: "Enter a valid mobile number and 6-digit PIN." },
         { status: 400 }
       );
     }
@@ -40,9 +37,8 @@ export async function POST(request: NextRequest) {
     );
 
     if (!result.ok) {
-      const message = await responseMessage(result);
       return NextResponse.json(
-        { success: false, message: message || "Unable to verify login." },
+        { success: false, message: await responseMessage(result) },
         { status: 502 }
       );
     }
@@ -96,7 +92,6 @@ export async function POST(request: NextRequest) {
     });
 
     response.cookies.set(COOKIE_NAME, token, deliveryCookieOptions());
-
     return response;
   } catch (error) {
     console.error("Delivery partner login error:", error);
