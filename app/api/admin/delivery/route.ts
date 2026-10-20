@@ -13,9 +13,7 @@ function authorized(request: Request) {
 }
 
 async function db(path: string, options: RequestInit = {}) {
-  if (!URL || !SECRET) {
-    throw new Error("Supabase is not configured.");
-  }
+  if (!URL || !SECRET) throw new Error("Supabase is not configured.");
 
   return fetch(`${URL}/rest/v1/${path}`, {
     ...options,
@@ -29,6 +27,17 @@ async function db(path: string, options: RequestInit = {}) {
   });
 }
 
+const uuidPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const statuses = [
+  "placed",
+  "preparing",
+  "out_for_delivery",
+  "delivered",
+  "cancelled",
+];
+
 export async function GET(request: Request) {
   if (!authorized(request)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -36,13 +45,17 @@ export async function GET(request: Request) {
 
   try {
     const [ordersRes, partnersRes] = await Promise.all([
-      db("orders?select=id,order_number,customer_name,customer_phone,delivery_address,order_status,total,created_at,assigned_partner_id,assigned_at&order=created_at.desc&limit=100"),
-      db("delivery_partners?select=id,full_name,phone,is_active&order=created_at.desc"),
+      db(
+        "orders?select=id,order_number,customer_name,customer_phone,delivery_address,order_status,total,created_at,assigned_partner_id,assigned_at&order=created_at.desc&limit=100"
+      ),
+      db(
+        "delivery_partners?select=id,full_name,phone,is_active&order=created_at.desc"
+      ),
     ]);
 
     if (!ordersRes.ok || !partnersRes.ok) {
       return NextResponse.json(
-        { error: "Could not load delivery data." },
+        { error: "Could not load delivery data. Check Supabase tables." },
         { status: 502 }
       );
     }
@@ -98,7 +111,7 @@ export async function POST(request: Request) {
 
       if (!response.ok) {
         return NextResponse.json(
-          { error: "Partner could not be added. Check if the phone already exists." },
+          { error: "Partner could not be added. Phone may already exist." },
           { status: 502 }
         );
       }
@@ -115,10 +128,7 @@ export async function POST(request: Request) {
       const partnerId =
         typeof body.partnerId === "string" ? body.partnerId : "";
 
-      const uuid =
-        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
-      if (!uuid.test(orderId) || !uuid.test(partnerId)) {
+      if (!uuidPattern.test(orderId) || !uuidPattern.test(partnerId)) {
         return NextResponse.json(
           { error: "Select a valid order and partner." },
           { status: 400 }
@@ -156,21 +166,50 @@ export async function POST(request: Request) {
       }
 
       const rows = await response.json();
-
       if (!rows.length) {
-        return NextResponse.json(
-          { error: "Order not found." },
-          { status: 404 }
-        );
+        return NextResponse.json({ error: "Order not found." }, { status: 404 });
       }
 
       return NextResponse.json({ order: rows[0] });
     }
 
-    return NextResponse.json(
-      { error: "Unknown action." },
-      { status: 400 }
-    );
+    if (body.action === "update_order_status") {
+      const orderId =
+        typeof body.orderId === "string" ? body.orderId : "";
+      const status = typeof body.status === "string" ? body.status : "";
+
+      if (!uuidPattern.test(orderId) || !statuses.includes(status)) {
+        return NextResponse.json(
+          { error: "Select a valid order and status." },
+          { status: 400 }
+        );
+      }
+
+      const response = await db(
+        `orders?id=eq.${orderId}&select=id,order_number,order_status`,
+        {
+          method: "PATCH",
+          headers: { Prefer: "return=representation" },
+          body: JSON.stringify({ order_status: status }),
+        }
+      );
+
+      if (!response.ok) {
+        return NextResponse.json(
+          { error: "Order status update failed." },
+          { status: 502 }
+        );
+      }
+
+      const rows = await response.json();
+      if (!rows.length) {
+        return NextResponse.json({ error: "Order not found." }, { status: 404 });
+      }
+
+      return NextResponse.json({ order: rows[0] });
+    }
+
+    return NextResponse.json({ error: "Unknown action." }, { status: 400 });
   } catch {
     return NextResponse.json(
       { error: "Invalid request or database error." },
@@ -178,4 +217,3 @@ export async function POST(request: Request) {
     );
   }
 }
-
