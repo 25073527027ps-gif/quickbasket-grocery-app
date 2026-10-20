@@ -2,6 +2,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import type { FormEvent } from "react";
 
 type Order = {
   id: string;
@@ -12,12 +13,19 @@ type Order = {
   order_status: string;
   total?: number;
   created_at?: string;
+  delivery_notes?: string;
+};
+
+type Partner = {
+  id: string;
+  name: string;
+  phone: string;
 };
 
 export default function DeliveryPartnerPage() {
   const [phone, setPhone] = useState("");
   const [pin, setPin] = useState("");
-  const [partner, setPartner] = useState("");
+  const [partner, setPartner] = useState<Partner | null>(null);
   const [orders, setOrders] = useState<Order[]>([]);
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
@@ -25,8 +33,10 @@ export default function DeliveryPartnerPage() {
   const loadOrders = useCallback(async () => {
     try {
       const response = await fetch("/api/delivery-partner/orders", {
+        method: "GET",
         cache: "no-store",
       });
+
       const data = await response.json();
 
       if (!response.ok) {
@@ -34,7 +44,7 @@ export default function DeliveryPartnerPage() {
         return;
       }
 
-      setOrders(data.orders || []);
+      setOrders(Array.isArray(data.orders) ? data.orders : []);
       setMessage("");
     } catch {
       setMessage("Network error. Dobara try karo.");
@@ -47,7 +57,7 @@ export default function DeliveryPartnerPage() {
     }
   }, [partner, loadOrders]);
 
-  async function login(event: React.FormEvent<HTMLFormElement>) {
+  async function login(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setLoading(true);
     setMessage("");
@@ -63,10 +73,17 @@ export default function DeliveryPartnerPage() {
 
       if (!response.ok) {
         setMessage(data.message || "Login failed.");
-      } else {
-        setPartner(data.partner.name);
-        setMessage("Login successful!");
+        return;
       }
+
+      if (!data.partner?.name) {
+        setMessage("Login response incomplete. Please try again.");
+        return;
+      }
+
+      setPartner(data.partner);
+      setPin("");
+      setMessage("Login successful!");
     } catch {
       setMessage("Network error. Dobara try karo.");
     } finally {
@@ -80,7 +97,7 @@ export default function DeliveryPartnerPage() {
 
     try {
       const response = await fetch("/api/delivery-partner/status", {
-        method: "POST",
+        method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ orderId, status }),
       });
@@ -89,10 +106,11 @@ export default function DeliveryPartnerPage() {
 
       if (!response.ok) {
         setMessage(data.message || "Status update nahi hua.");
-      } else {
-        setMessage("Order status updated.");
-        await loadOrders();
+        return;
       }
+
+      setMessage("Order status updated!");
+      await loadOrders();
     } catch {
       setMessage("Network error. Dobara try karo.");
     } finally {
@@ -101,23 +119,44 @@ export default function DeliveryPartnerPage() {
   }
 
   async function logout() {
+    setLoading(true);
+
     try {
-      await fetch("/api/delivery-partner/logout", { method: "POST" });
-    } finally {
-      setPartner("");
+      const response = await fetch("/api/delivery-partner/logout", {
+        method: "POST",
+      });
+
+      if (!response.ok) {
+        setMessage("Logout nahi hua. Dobara try karo.");
+        return;
+      }
+
+      setPartner(null);
       setOrders([]);
+      setPhone("");
       setPin("");
-      setMessage("Logged out.");
+      setMessage("Logged out successfully.");
+    } catch {
+      setMessage("Network error. Dobara try karo.");
+    } finally {
+      setLoading(false);
     }
   }
 
   return (
     <main className="mx-auto min-h-screen max-w-3xl bg-gray-50 p-4 text-gray-900">
-      <h1 className="mb-2 text-3xl font-bold">QuickBasket Delivery</h1>
-      <p className="mb-6 text-gray-600">Delivery Partner Panel</p>
+      <header className="mb-6">
+        <h1 className="text-3xl font-bold">QuickBasket Delivery</h1>
+        <p className="mt-1 text-gray-600">Delivery Partner Panel</p>
+      </header>
 
       {message && (
-        <p className="mb-4 rounded-lg bg-blue-100 p-3">{message}</p>
+        <div
+          role="status"
+          className="mb-4 rounded-lg bg-blue-100 p-3 text-blue-900"
+        >
+          {message}
+        </div>
       )}
 
       {!partner ? (
@@ -128,19 +167,22 @@ export default function DeliveryPartnerPage() {
           <h2 className="text-xl font-semibold">Partner Login</h2>
 
           <label className="block">
-            Mobile number
+            <span>Mobile number</span>
             <input
               className="mt-1 w-full rounded-lg border p-3"
+              type="tel"
               value={phone}
               onChange={(event) => setPhone(event.target.value)}
               inputMode="numeric"
               maxLength={10}
+              pattern="[0-9]{10}"
+              autoComplete="tel"
               required
             />
           </label>
 
           <label className="block">
-            6-digit PIN
+            <span>6-digit PIN</span>
             <input
               className="mt-1 w-full rounded-lg border p-3"
               type="password"
@@ -148,6 +190,8 @@ export default function DeliveryPartnerPage() {
               onChange={(event) => setPin(event.target.value)}
               inputMode="numeric"
               maxLength={6}
+              pattern="[0-9]{6}"
+              autoComplete="current-password"
               required
             />
           </label>
@@ -162,14 +206,18 @@ export default function DeliveryPartnerPage() {
         </form>
       ) : (
         <>
-          <section className="mb-5 flex items-center justify-between rounded-xl bg-white p-4 shadow">
+          <section className="mb-5 flex items-center justify-between gap-3 rounded-xl bg-white p-4 shadow">
             <div>
               <p className="text-sm text-gray-500">Welcome</p>
-              <h2 className="text-xl font-semibold">{partner}</h2>
+              <h2 className="text-xl font-semibold">{partner.name}</h2>
+              <p className="text-sm text-gray-600">{partner.phone}</p>
             </div>
+
             <button
-              onClick={logout}
-              className="rounded-lg border px-4 py-2"
+              type="button"
+              onClick={() => void logout()}
+              disabled={loading}
+              className="rounded-lg border px-4 py-2 disabled:opacity-50"
             >
               Logout
             </button>
@@ -178,17 +226,22 @@ export default function DeliveryPartnerPage() {
           <div className="mb-4 flex items-center justify-between">
             <h2 className="text-xl font-bold">My Orders</h2>
             <button
+              type="button"
               onClick={() => void loadOrders()}
-              className="rounded-lg border bg-white px-3 py-2"
+              disabled={loading}
+              className="rounded-lg border bg-white px-3 py-2 disabled:opacity-50"
             >
               Refresh
             </button>
           </div>
 
           {orders.length === 0 ? (
-            <p className="rounded-xl bg-white p-5 shadow">
-              Abhi koi assigned order nahi hai.
-            </p>
+            <div className="rounded-xl bg-white p-5 shadow">
+              <p>Abhi koi assigned order nahi hai.</p>
+              <p className="mt-1 text-sm text-gray-500">
+                Naye assigned orders dekhne ke liye Refresh dabao.
+              </p>
+            </div>
           ) : (
             <div className="space-y-4">
               {orders.map((order) => (
@@ -196,11 +249,11 @@ export default function DeliveryPartnerPage() {
                   key={order.id}
                   className="space-y-3 rounded-xl bg-white p-5 shadow"
                 >
-                  <div className="flex justify-between gap-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
                     <h3 className="font-bold">
                       Order #{order.order_number || order.id.slice(0, 8)}
                     </h3>
-                    <span className="text-sm font-semibold">
+                    <span className="rounded-full bg-gray-100 px-3 py-1 text-sm font-semibold">
                       {order.order_status}
                     </span>
                   </div>
@@ -210,13 +263,18 @@ export default function DeliveryPartnerPage() {
                   <p>Address: {order.delivery_address || "N/A"}</p>
                   <p>Total: ₹{Number(order.total || 0).toFixed(2)}</p>
 
+                  {order.delivery_notes && (
+                    <p>Notes: {order.delivery_notes}</p>
+                  )}
+
                   {order.order_status === "placed" && (
                     <button
+                      type="button"
                       disabled={loading}
                       onClick={() =>
                         void updateStatus(order.id, "preparing")
                       }
-                      className="w-full rounded-lg bg-blue-700 p-3 text-white"
+                      className="w-full rounded-lg bg-blue-700 p-3 text-white disabled:opacity-50"
                     >
                       Accept / Preparing
                     </button>
@@ -224,11 +282,12 @@ export default function DeliveryPartnerPage() {
 
                   {order.order_status === "preparing" && (
                     <button
+                      type="button"
                       disabled={loading}
                       onClick={() =>
                         void updateStatus(order.id, "out_for_delivery")
                       }
-                      className="w-full rounded-lg bg-orange-600 p-3 text-white"
+                      className="w-full rounded-lg bg-orange-600 p-3 text-white disabled:opacity-50"
                     >
                       Out for Delivery
                     </button>
@@ -236,11 +295,12 @@ export default function DeliveryPartnerPage() {
 
                   {order.order_status === "out_for_delivery" && (
                     <button
+                      type="button"
                       disabled={loading}
                       onClick={() =>
                         void updateStatus(order.id, "delivered")
                       }
-                      className="w-full rounded-lg bg-green-700 p-3 text-white"
+                      className="w-full rounded-lg bg-green-700 p-3 text-white disabled:opacity-50"
                     >
                       Mark Delivered
                     </button>
