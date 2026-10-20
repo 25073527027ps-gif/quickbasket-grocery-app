@@ -2,95 +2,95 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   readDeliverySession,
-  supabaseRequest,
   responseMessage,
+  supabaseRequest,
 } from "@/lib/delivery-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const allowedTransitions: Record<string, string[]> = {
-  placed: ["preparing"],
-  preparing: ["out_for_delivery"],
-  out_for_delivery: ["delivered"],
-};
+const allowedStatuses = [
+  "preparing",
+  "out_for_delivery",
+  "delivered",
+];
 
-export async function POST(request: NextRequest) {
-  const session = readDeliverySession(request);
-
-  if (!session) {
-    return NextResponse.json(
-      { success: false, message: "Please log in again." },
-      { status: 401 }
-    );
-  }
-
+export async function PATCH(request: NextRequest) {
   try {
+    const session = readDeliverySession(request);
+
+    if (!session) {
+      return NextResponse.json(
+        { success: false, message: "Please login again." },
+        { status: 401 }
+      );
+    }
+
     const body = await request.json();
-    const orderId = String(body.orderId ?? "");
-    const newStatus = String(body.status ?? "");
+    const orderId = String(body.orderId || "").trim();
+    const status = String(body.status || "").trim();
 
-    if (!/^[0-9a-f-]{36}$/i.test(orderId)) {
+    if (!orderId || !allowedStatuses.includes(status)) {
       return NextResponse.json(
-        { success: false, message: "Invalid order ID." },
+        { success: false, message: "Invalid order ID or status." },
         { status: 400 }
       );
     }
 
-    if (!Object.values(allowedTransitions).some((s) => s.includes(newStatus))) {
-      return NextResponse.json(
-        { success: false, message: "Invalid order status." },
-        { status: 400 }
-      );
-    }
+    const checkQuery = new URLSearchParams({
+      select: "id,assigned_partner_id",
+      id: `eq.${orderId}`,
+      assigned_partner_id: `eq.${session.partnerId}`,
+    });
 
     const check = await supabaseRequest(
-      `orders?id=eq.${orderId}&assigned_partner_id=eq.${session.partnerId}&select=id,order_status`
+      `orders?${checkQuery.toString()}`
     );
 
     if (!check.ok) {
+      const message = await responseMessage(check);
       return NextResponse.json(
-        { success: false, message: await responseMessage(check) },
+        { success: false, message },
         { status: 502 }
       );
     }
 
-    const rows = await check.json();
-    const order = rows[0];
+    const orders = await check.json();
 
-    if (!order) {
+    if (!Array.isArray(orders) || orders.length === 0) {
       return NextResponse.json(
-        { success: false, message: "Order not found or not assigned to you." },
+        { success: false, message: "Order not found for this partner." },
         { status: 404 }
       );
     }
 
-    if (!(allowedTransitions[order.order_status] ?? []).includes(newStatus)) {
-      return NextResponse.json(
-        { success: false, message: "This status change is not allowed." },
-        { status: 400 }
-      );
-    }
+    const updateQuery = new URLSearchParams({
+      id: `eq.${orderId}`,
+      assigned_partner_id: `eq.${session.partnerId}`,
+    });
 
     const update = await supabaseRequest(
-      `orders?id=eq.${orderId}&assigned_partner_id=eq.${session.partnerId}`,
+      `orders?${updateQuery.toString()}`,
       {
         method: "PATCH",
-        headers: { Prefer: "return=representation" },
-        body: JSON.stringify({ order_status: newStatus }),
+        headers: {
+          Prefer: "return=representation",
+        },
+        body: JSON.stringify({ order_status: status }),
       }
     );
 
     if (!update.ok) {
+      const message = await responseMessage(update);
       return NextResponse.json(
-        { success: false, message: await responseMessage(update) },
+        { success: false, message },
         { status: 502 }
       );
     }
 
-    const updated = await update.json();
+    const updatedOrders = await update.json();
 
-    if (!updated.length) {
+    if (!Array.isArray(updatedOrders) || updatedOrders.length === 0) {
       return NextResponse.json(
         { success: false, message: "Order status was not updated." },
         { status: 409 }
@@ -99,13 +99,15 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      order: updated[0],
+      message: "Order status updated.",
+      order: updatedOrders[0],
     });
-  } catch {
+  } catch (error) {
+    console.error("Delivery partner status error:", error);
+
     return NextResponse.json(
-      { success: false, message: "Unable to update order status." },
+      { success: false, message: "Server error. Please try again." },
       { status: 500 }
     );
   }
 }
-
